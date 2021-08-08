@@ -54,6 +54,7 @@ Route::get('profile/verify/{verify_token}', 'UserProfileController@verify')->nam
 Route::get('gapi/auth', 'GapiController@auth')->name('gapi.auth');
 Route::post('gapi/auth', 'GapiController@checkauth')->name('gapi.checkauth');
 Route::any('gapi', 'GapiController@apicall')->name('gapi.apicall');
+Route::post('gapi/token', 'GapiController@token');
 
 //API v2 key management
 Route::get('apikey', 'ApiKeyController@index')->name('apikey.index')->middleware('auth');

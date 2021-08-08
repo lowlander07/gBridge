@@ -5,11 +5,12 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use App\Accesskey;
 use App\Device;
+use App\User;
 
-use Illuminate\Support\Facades\Redis;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Redis;
 
 class GapiController extends Controller
 {
@@ -30,6 +31,8 @@ class GapiController extends Controller
         ]);
     }
 
+/* ------------------------------------------------------------------------- */
+
     /**
      * Check authentication.
      *
@@ -47,15 +50,23 @@ class GapiController extends Controller
         //check parameters provided by Google
         $googleerror_prefix = "The request by Google Home was malformed. Please try again in a few minute. If this problem persists, please contact the team of Kappelt gBridge. ";
         
+        // Check client_id
         if($request->input('client_id', '__y') != env('GOOGLE_CLIENTID', '__z')){
             return redirect()->back()->withInput()->with('error', $googleerror_prefix . 'Invalid Client ID has been provided!');
         }
-        if($request->input('response_type', '') != 'token'){
+
+        // Check response_type
+		// token not valid anymore, now code is used as response_type.
+        if($request->input('response_type', '') != 'code'){
             return redirect()->back()->withInput()->with('error', $googleerror_prefix . 'Unkown Response Type requested!');
         }
+		
+        // Check redirect_uri
         if($request->input('redirect_uri', '__x') != ('https://oauth-redirect.googleusercontent.com/r/' . env('GOOGLE_PROJECTID', ''))){
             return redirect()->back()->withInput()->with('error', $googleerror_prefix . 'Invalid redirect Request!');
         }
+		
+        // Check state
         if(!$request->input('state')){
             return redirect()->back()->withInput()->with('error', $googleerror_prefix . 'No State given!');
         }
@@ -74,22 +85,162 @@ class GapiController extends Controller
             return redirect()->back()->withInput()->with('error', "You need to confirm your account. We have sent you an activation code, please check your email account. Check the spam folder for this mail, contact support under gbridge@kappelt.net if you haven't received the confirmation");
         }
 
-        $accesskey = new Accesskey;
-        $accesskey->google_key = password_hash(str_random(32), PASSWORD_BCRYPT);
-        $accesskey->user_id = Auth::user()->user_id;
+		// ===== All is okay, we can set some data now =====
 
+		// Set name of current user to client_id (default set to email), so in next step we can check on this.
+        $edituser = User::find(Auth::user()->user_id);
+        $edituser->name = $request->input('client_id');
+        $edituser->save();
+
+		// Clear the previous authorization code of this user, otherwise table gets filled up with old data.
+		$user_id = Auth::user()->user_id;
+		Accesskey::where('user_id', $user_id)->delete();
+
+		// Create a new authorization code in the database for this user
+        $accesskey = new Accesskey;
+        $accesskey->user_id = $user_id;
+		$accesskey->auth_code = password_hash(str_random(32), PASSWORD_BCRYPT);
+		$accesskey->redirect_uri = $request->input('redirect_uri');
         $accesskey->save();
 
-        return redirect($request->input('redirect_uri') . '#access_token=' . $accesskey->google_key . '&token_type=bearer&state=' . $request->input('state'));
+		$str = $request->input('redirect_uri') . '?code=' . $accesskey->auth_code . '&state=' . $request->input('state');		
+		return redirect($str);
     }
+
+/* ------------------------------------------------------------------------- */
+
+    /**
+     *		Google responses with a POST request to token
+     */
+    public function token(Request $request) {
+		
+		$client_id		= $request->header('Php-Auth-User');
+		$client_secret	= $request->header('Php-Auth-Pw');
+		$grant_type		= $request->input('grant_type');
+
+		$error_message = '{"error": "invalid_grant"}';
+
+		// Check client_id against our variable list
+        if ($client_id != env('GOOGLE_CLIENTID')) {
+			return response($error_message, 400);
+        }
+
+		// Check client_secret against our variable list
+        if ($client_secret != env('GOOGLE_CLIENT_SECRET')) {
+			return response($error_message, 400);
+        }
+
+		// Determine the next step
+		if ($grant_type == 'authorization_code') {
+			$body = $this->handle_authorization_code($request);
+			if ($body == 'error') {
+				return response($error_message, 400);
+			} else
+				return response()->json($body);
+
+		} elseif ($grant_type == 'refresh_token') {
+			$body = $this->handle_refresh_token($request);
+			if ($body == 'error') {
+				return response($error_message, 400);
+			} else
+				return response()->json($body);
+
+		} else {			
+			return response($error_message, 400);
+		}
+	}
+
+/* ------------------------------------------------------------------------- */
+
+	private function handle_authorization_code (Request $request) {
+
+		// ===== Exchange authorization codes for access tokens and refresh tokens =====
+
+		$client_id		= $request->header('Php-Auth-User');	
+		$code			= $request->input('code');
+		$redirect_uri	= $request->input('redirect_uri');
+
+		// Get accesskey and the user that belong together
+		$user = User::where('name', $client_id)->get()->first(); // there is only one user with this name
+		$accesskey = Accesskey::where('user_id', $user->user_id)->get()->first(); // again, there is only one access key for this user
+				
+		// Verify that the authorization code is valid
+		if ($code !== $accesskey->auth_code) {
+			return "error";
+		}
+
+		// Verify that the authorization code is not expired (>10 minutes)
+		if ($accesskey->created_at->diffInMinutes() > 10) {
+			return "error";
+		}
+		
+		// Verify that client ID of this request matches the client ID of the authorization code.
+		if ($client_id !== $user->name) {
+			return "error";
+		}
+		
+		// Confirm that the URL specified by the redirect_uri parameter is identical to the value used in the initial authorization request.		
+		if ($redirect_uri !== $accesskey->redirect_uri) {
+			return "error";
+		}
+
+		// ===== Everything is okay, we can now generate the refresh and access token =====
+
+		// Use the user ID from the authorization code to generate a refresh token and an access token.
+		$accesskey->refresh_token = password_hash(str_random(32), PASSWORD_BCRYPT);
+		$accesskey->google_key = password_hash(str_random(32), PASSWORD_BCRYPT);
+        $accesskey->save();
+
+		// Assemble the return message
+		$body = [
+			'token_type' => 'Bearer', 
+			'access_token' => $accesskey->google_key,
+			'refresh_token' => $accesskey->refresh_token,
+			'expires_in' => 3600
+		];
+		return $body;
+	}
+	
+/* ------------------------------------------------------------------------- */
+
+	private function handle_refresh_token (Request $request) {
+		
+		// ===== Exchange refresh tokens for access tokens =====
+
+		$client_id		= $request->header('Php-Auth-User');	
+		$refresh_token	= $request->input('refresh_token');
+
+		// Get accesskey and the user that belong together
+		$user = User::where('name', $client_id)->get()->first(); // there is only one user with this name
+		$accesskey = Accesskey::where('user_id', $user->user_id)->get()->first(); // again, there is only one access key for this user
+
+		// Verify that the refresh token is valid
+		if ($refresh_token !== $accesskey->refresh_token) {
+			return "error";
+		}
+
+		// ===== Everything is okay, we can generate a new access token =====
+		$accesskey->google_key = password_hash(str_random(32), PASSWORD_BCRYPT);
+        $accesskey->save();
+
+		// Assemble the return message
+		$body = [
+			'token_type' => 'Bearer', 
+			'access_token' => $accesskey->google_key,
+			'expires_in' => 3600
+		];
+		return $body;
+	}
+	
+/* ------------------------------------------------------------------------- */
 
     /**
      * Handle an apicall by google
      *
      * @return \Illuminate\Http\Response
      */
-    function apicall(Request $laravel_request){
-
+    function apicall(Request $laravel_request) {
+		
         $request = json_decode($laravel_request->getContent(), true);
 
         //check, whether requestId is present
