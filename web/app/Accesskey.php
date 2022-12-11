@@ -18,7 +18,7 @@ class Accesskey extends Model
     /**
      * Timestamps are unnecessary
      */
-    public $timestamps = false;
+    //public $timestamps = false;
 
     public function user(){
         return $this->belongsTo('App\User', 'user_id');

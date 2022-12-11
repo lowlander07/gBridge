@@ -56,6 +56,23 @@ redis_cache.on('error', function (err) {
     console.log('Redis client (cache) error: ' + err);
 });
 
+// BB: request for Google sync to store devices in Redis 
+async function requestSync(userid) {
+	try {
+		const response = await axios.post(`https://homegraph.googleapis.com/v1/devices:requestSync?key=${config["homegraph-api-key"]}`,
+			`{agent_user_id: "${userid}"}`,
+				{
+					headers: { "Content-Type": "application/json" }
+				});
+	} catch (error) {
+		var responseData = "";
+		if (error.response) {
+			responseData = JSON.stringify(error.response.data);
+		}
+		console.log("Google Request Sync error: \"" + error + `" for user ${userid}, response ${responseData}`);
+	}
+};
+
 /**
  * Direction from Redis to MQTT broker
  * This way happens, if the user demands an action from Google Assistant (like "turn the lights on")
@@ -84,22 +101,7 @@ redis_subscribe.on("pmessage", function (pattern, channel, message) {
 
     //calling google API to request a sync
     if (devicetrait === 'requestsync') {
-        async function requestSync() {
-            try {
-                const response = await axios.post(`https://homegraph.googleapis.com/v1/devices:requestSync?key=${config["homegraph-api-key"]}`,
-                    `{agent_user_id: "${userid}"}`,
-                    {
-                        headers: { "Content-Type": "application/json" }
-                    });
-            } catch (error) {
-                var responseData = "";
-                if (error.response) {
-                    responseData = JSON.stringify(error.response.data);
-                }
-                console.log("Google Request Sync error: \"" + error + `" for user ${userid}, response ${responseData}`);
-            }
-        };
-        requestSync();
+        requestSync(userid);
     }
 
     getDevicesOfUser(userid, function (err, info) {
@@ -207,6 +209,16 @@ redis_subscribe.on("pmessage", function (pattern, channel, message) {
 });
 redis_subscribe.psubscribe("gbridge:u*:d*:*");
 
+// BB: request to store devices if it not exists yet
+redis_cache.exists('gbridge:u1:devices', function(err, reply) {
+	if (reply === 1) {
+		console.log('BB: gbridge:u1:devices exists!');
+	} else {
+		console.log('BB: gbridge:u1:devices does not exist!');
+		requestSync('1');
+  	}
+});
+
 /**
  * Users write to MQTT topics, formatted "gBridge/u<user-id>/<user-custom-part>"
  * This function tries to isolate the user id from the topic
@@ -254,6 +266,7 @@ function guessUserIdFromMqttTopic(topic) {
  *  - data: An associative array containing the information
  */
 function getDevicesOfUser(userid, callback) {
+
     redis_cache.get(`gbridge:u${userid}:devices`, function (err, response) {
         if (err) {
             callback("Redis client error while fetching device for user " + userid + ": " + err, null);

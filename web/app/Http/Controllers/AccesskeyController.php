@@ -24,7 +24,7 @@ class AccesskeyController extends Controller
      */
     public function index()
     {
-        $accesskeys = Auth::user()->accesskeys()->orderBy('generated_at', 'asc')->get();
+        $accesskeys = Auth::user()->accesskeys()->orderBy('created_at', 'asc')->get();
 
         return view('accesskey.accesskeys', [
             'site_title' => 'Account Linking',
